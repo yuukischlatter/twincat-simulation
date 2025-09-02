@@ -223,7 +223,7 @@ class FB_EL3783_LxLy:
                 
                 try:
                     # Calculate phase-compensated sample time
-                    phase_compensated_time = max(0, int(self._samplingTime - firFilterDelayTime))
+                    phase_compensated_time = max(0, int(self._samplingTime + firFilterDelayTime))
                     
                     # Zero crossing detection on filtered voltage
                     # FIXED: Proper return value handling - our zero crossing detector returns (detected, last_crossing, voltage_sign, avg_time)
