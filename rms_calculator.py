@@ -17,6 +17,7 @@ FIXES APPLIED:
 - Improved zero crossing detection robustness
 - Fixed frequency calculation accuracy
 - Proper TwinCAT method execution order
+- SIMPLE FIX: Skip first 3 measurements to avoid initialization garbage
 """
 
 import numpy as np
@@ -75,6 +76,10 @@ class RMSHalfCycle:
         
         # FIXED: Add initialization flag to handle first few calls properly
         self.first_call = True
+        
+        # SIMPLE FIX: Skip first few measurements to avoid initialization garbage
+        self.measurement_count = 0
+        self.skip_first_measurements = 3
     
     def Call(self, aSamples: List[float], sampleTime: int) -> Tuple[bool, int, float]:
         """
@@ -265,6 +270,14 @@ class RMSHalfCycle:
             if self.lastZeroCrossingLastCycle == 0:
                 self.lastZeroCrossingLastCycle = max(0, sampleTime - 10000000)  # 10ms ago
         
+        # SIMPLE FIX: Skip first few measurements (they're initialization garbage)
+        if zero_crossing_detected:
+            self.measurement_count += 1
+            
+            if self.measurement_count <= self.skip_first_measurements:
+                # Skip this measurement - return zero for RMS but keep the zero crossing detection
+                return (zero_crossing_detected, averageTimeBetweenZeroCrossing, 0.0)
+        
         # Return tuple: (zero_crossing_detected, averageTimeBetweenZeroCrossing, RMS)
         return (zero_crossing_detected, averageTimeBetweenZeroCrossing, RMS)
     
@@ -292,6 +305,8 @@ class RMSHalfCycle:
         self.sampleIdx = 0
         self.sumForRMS = 0.0
         self.first_call = True
+        # Reset measurement counter too
+        self.measurement_count = 0
 
 
 class RMSMeasurementSystem:
@@ -359,7 +374,7 @@ class RMSMeasurementSystem:
             else:
                 frequency = 0.0  # Invalid frequency
             
-            # Store RMS measurement
+            # Store RMS measurement - ONLY if RMS > 0 (this filters out the skipped initial measurements)
             if rms_value > 0:
                 self.rms_measurements.append(rms_value)
         
@@ -444,6 +459,7 @@ if __name__ == "__main__":
     print(f"  Task Cycles: {task_cycles}")
     print(f"  Oversamples per cycle: 8")
     print(f"  Total samples: {task_cycles * 8}")
+    print(f"  Skipping first: 3 measurements")
     
     # Process task cycles
     results = []
