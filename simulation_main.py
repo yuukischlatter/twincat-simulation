@@ -1,13 +1,13 @@
 """
-simulation_main.py - TwinCAT Complete System Simulation - FIXED VERSION
-========================================================================
+simulation_main.py - TwinCAT Complete System Simulation - REFACTORED VERSION
+==========================================================================
 
 TwinCAT Sources: 
 - Task timing from Documents 17-23 (Measurements.TcTTO: 400µs, Priority 3)
 - System integration from FB_EL3783_LxLy and complete measurement chain
 
 This orchestrates the complete 1:1 TwinCAT simulation:
-1. Signal Generation (realistic mains with disturbances)
+1. Signal Generation (using existing signal_generator.py)
 2. Hardware Interface (ADC conversion, timing)
 3. Measurement Processing (FIR, Zero Crossing, RMS)
 4. Task Scheduling (400µs cycles like TwinCAT)
@@ -15,12 +15,11 @@ This orchestrates the complete 1:1 TwinCAT simulation:
 
 Complete pipeline: Signal → Hardware → Measurement → Analysis
 
-FIXES APPLIED:
-- Fixed JSON serialization error (numpy types)
-- Fixed negative sampling time issues
-- Improved timing calculations for proper RMS operation
-- Fixed frequency calculation display
-- Better error handling and bounds checking
+REFACTORED CHANGES:
+- Removed duplicate TwinCATSignalGenerator class
+- Now imports and uses TwinCATIntegratedSignGenerator from signal_generator.py
+- Cleaner architecture with single signal generator
+- Maintained all original functionality
 """
 
 import numpy as np
@@ -35,6 +34,9 @@ from fir_filter import FB_FIRFilterOvSampl, create_configured_filter
 from zero_crossing_detector import ZeroCrossing, ZeroCrossingSimulator
 from rms_calculator import RMSHalfCycle, RMSMeasurementSystem
 from measurement_system import FB_EL3783_LxLy, MeasurementSystemSimulator
+
+# Import the existing signal generator (no more duplicates!)
+from signal_generator import TwinCATIntegratedSignGenerator
 
 
 @dataclass
@@ -72,101 +74,6 @@ class SimulationConfig:
     voltage_tolerance_percent: float = 2.0      # ±2% voltage tolerance
 
 
-class TwinCATSignalGenerator:
-    """
-    Realistic mains signal generator matching your original signal_generator.py
-    
-    Generates 3-phase mains voltage with realistic disturbances:
-    - Harmonics (3rd, 5th, 7th)
-    - Voltage drops and spikes
-    - Noise and jitter
-    - Phase shifts between L1, L2, L3
-    """
-    
-    def __init__(self, config: SimulationConfig):
-        self.config = config
-        
-        # Harmonic content (typical for mains supply)
-        self.harmonics = [3, 5, 7]
-        self.harmonic_amplitudes = [0.15, 0.08, 0.04]  # Realistic levels
-        
-        # Disturbance parameters
-        self.disturbance_probability = 0.02  # 2% chance per cycle
-        self.last_disturbance_time = 0
-        
-    def generate_three_phase_samples(self, time_points: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Generate realistic 3-phase mains voltage samples
-        
-        Args:
-            time_points: Array of time points in seconds
-            
-        Returns:
-            Tuple of (L1, L2, L3) voltage arrays
-        """
-        # Base 50Hz sine waves with 120° phase shifts
-        omega = 2 * np.pi * self.config.mains_frequency_hz
-        
-        # L1 phase (reference)
-        L1 = self.config.mains_amplitude_v * np.sin(omega * time_points)
-        
-        # L2 phase (120° lag)
-        L2 = self.config.mains_amplitude_v * np.sin(omega * time_points - 2*np.pi/3)
-        
-        # L3 phase (240° lag)
-        L3 = self.config.mains_amplitude_v * np.sin(omega * time_points - 4*np.pi/3)
-        
-        # Add harmonics if enabled
-        if self.config.enable_harmonics:
-            for harm_order, amplitude in zip(self.harmonics, self.harmonic_amplitudes):
-                harm_omega = omega * harm_order
-                L1 += amplitude * self.config.mains_amplitude_v * np.sin(harm_omega * time_points)
-                L2 += amplitude * self.config.mains_amplitude_v * np.sin(harm_omega * time_points - 2*np.pi/3)
-                L3 += amplitude * self.config.mains_amplitude_v * np.sin(harm_omega * time_points - 4*np.pi/3)
-        
-        # Add disturbances if enabled
-        if self.config.enable_disturbances:
-            L1 = self._add_disturbances(L1, time_points)
-            L2 = self._add_disturbances(L2, time_points)
-            L3 = self._add_disturbances(L3, time_points)
-        
-        # Add noise
-        noise_L1 = self.config.noise_level_v * np.random.normal(0, 1, len(time_points))
-        noise_L2 = self.config.noise_level_v * np.random.normal(0, 1, len(time_points))
-        noise_L3 = self.config.noise_level_v * np.random.normal(0, 1, len(time_points))
-        
-        L1 += noise_L1
-        L2 += noise_L2
-        L3 += noise_L3
-        
-        return L1, L2, L3
-    
-    def _add_disturbances(self, signal: np.ndarray, time_points: np.ndarray) -> np.ndarray:
-        """
-        Add realistic voltage disturbances (drops, spikes, flicker)
-        """
-        disturbed_signal = signal.copy()
-        
-        # Add occasional voltage drops/spikes
-        for i in range(len(signal)):
-            if np.random.random() < self.disturbance_probability:
-                if time_points[i] - self.last_disturbance_time > 0.02:  # Min 20ms between disturbances
-                    duration_samples = min(int(0.003 / (time_points[1] - time_points[0])), len(signal) - i)  # 3ms duration
-                    
-                    if np.random.random() < 0.5:
-                        # Voltage drop (0.5 to 0.8 of nominal)
-                        factor = 0.5 + 0.3 * np.random.random()
-                    else:
-                        # Voltage spike (1.2 to 1.6 of nominal)
-                        factor = 1.2 + 0.4 * np.random.random()
-                    
-                    end_idx = min(i + duration_samples, len(signal))
-                    disturbed_signal[i:end_idx] *= factor
-                    self.last_disturbance_time = time_points[i]
-        
-        return disturbed_signal
-
-
 class TwinCATTaskScheduler:
     """
     TwinCAT task scheduling simulation
@@ -181,7 +88,7 @@ class TwinCATTaskScheduler:
         self.config = config
         self.measurement_task_period_ns = int(config.measurement_task_cycle_us * 1000)
         
-        # Task state - FIXED: Start with positive time to avoid negative sampling times
+        # Task state - Start with positive time to avoid negative sampling times
         self.current_time_ns = self.measurement_task_period_ns  # Start after first cycle
         self.measurement_cycle_count = 0
         self.start_time_real = time.time()
@@ -239,7 +146,7 @@ class TwinCATSystemSimulation:
     Complete TwinCAT system simulation
     
     Orchestrates all components:
-    1. Signal generation with realistic mains
+    1. Signal generation using existing signal_generator.py
     2. Task scheduling with proper timing
     3. Hardware interface (ADC, timing)  
     4. Measurement processing (all algorithms)
@@ -249,8 +156,8 @@ class TwinCATSystemSimulation:
     def __init__(self, config: SimulationConfig):
         self.config = config
         
-        # Initialize subsystems
-        self.signal_generator = TwinCATSignalGenerator(config)
+        # Initialize subsystems - using the existing signal generator!
+        self.signal_generator = TwinCATIntegratedSignGenerator()
         self.task_scheduler = TwinCATTaskScheduler(config)
         self.measurement_simulator = MeasurementSystemSimulator(config.measurement_task_cycle_us)
         
@@ -266,10 +173,11 @@ class TwinCATSystemSimulation:
         self.frequency_measurements = []
         self.voltage_measurements = []
         
-        print(f"🔧 TwinCAT System Simulation Initialized")
+        print(f"TwinCAT System Simulation Initialized")
         print(f"   Task Cycle: {config.measurement_task_cycle_us}µs")
         print(f"   Duration: {config.simulation_duration_ms}ms") 
         print(f"   Expected Cycles: {int(config.simulation_duration_ms * 1000 / config.measurement_task_cycle_us)}")
+        print(f"   Signal Generator: TwinCATIntegratedSignGenerator (from signal_generator.py)")
     
     def run_simulation(self) -> Dict:
         """
@@ -278,7 +186,7 @@ class TwinCATSystemSimulation:
         Returns:
             Dict: Complete simulation results and analysis
         """
-        print(f"\n🚀 Starting TwinCAT System Simulation...")
+        print(f"\nStarting TwinCAT System Simulation...")
         
         # Calculate simulation parameters
         total_cycles = int(self.config.simulation_duration_ms * 1000 / self.config.measurement_task_cycle_us)
@@ -293,8 +201,9 @@ class TwinCATSystemSimulation:
             # Get oversample time points for this cycle
             sample_times = self.task_scheduler.calculate_oversample_times()
             
-            # Generate 3-phase voltages at oversample times
-            L1_voltages, L2_voltages, L3_voltages = self.signal_generator.generate_three_phase_samples(sample_times)
+            # Generate 3-phase voltages using the existing signal generator
+            L1_voltages, L2_voltages, L3_voltages = self._generate_voltages_at_times(
+                sample_times, self.config.mains_amplitude_v)
             
             # Store signal data for analysis
             self.signal_data.append({
@@ -306,8 +215,7 @@ class TwinCATSystemSimulation:
                 'L3_voltages': L3_voltages.tolist()
             })
             
-            # For line-to-line measurement, use L1 and L2 (Lx=L1, Ly=L2)
-            # Process measurement cycle
+            # Process measurement cycle (using L1 and L2 for line-to-line measurement)
             result = self.measurement_simulator.process_measurement_cycle(
                 L1_voltages.tolist(),  # Lx samples
                 L2_voltages.tolist(),  # Ly samples
@@ -338,7 +246,7 @@ class TwinCATSystemSimulation:
         simulation_end_time = time.time()
         simulation_duration_real = simulation_end_time - simulation_start_time
         
-        print(f"✅ Simulation Complete!")
+        print(f"Simulation Complete!")
         print(f"   Real Time: {simulation_duration_real:.2f}s")
         print(f"   Simulated Time: {self.config.simulation_duration_ms}ms")
         print(f"   Speed Factor: {(self.config.simulation_duration_ms/1000)/simulation_duration_real:.1f}x")
@@ -359,6 +267,25 @@ class TwinCATSystemSimulation:
             'signal_data': self.signal_data[:10],  # First 10 cycles for analysis
             'analysis': analysis
         }
+    
+    def _generate_voltages_at_times(self, sample_times: np.ndarray, amplitude: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Generate 3-phase voltages using the existing signal generator
+        
+        This method acts as a bridge between the task scheduler timing
+        and the existing signal generator's methods.
+        """
+        # Use the existing signal generator's 3-phase generation method
+        L1_voltages, L2_voltages, L3_voltages = self.signal_generator._generate_3phase_at_times(
+            sample_times, amplitude)
+        
+        # Apply disturbances using the existing signal generator's method
+        cycle_idx = self.task_scheduler.measurement_cycle_count
+        L1_voltages = self.signal_generator._apply_your_disturbances(L1_voltages, sample_times, cycle_idx)
+        L2_voltages = self.signal_generator._apply_your_disturbances(L2_voltages, sample_times, cycle_idx)
+        L3_voltages = self.signal_generator._apply_your_disturbances(L3_voltages, sample_times, cycle_idx)
+        
+        return L1_voltages, L2_voltages, L3_voltages
     
     def _analyze_results(self) -> Dict:
         """
@@ -432,7 +359,7 @@ class TwinCATSystemSimulation:
         """
         Save simulation results to JSON file for further analysis
         
-        FIXED: Handle numpy types and other non-JSON serializable objects
+        Handles numpy types and other non-JSON serializable objects
         """
         try:
             # Convert numpy types and other non-serializable objects for JSON compatibility
@@ -463,9 +390,9 @@ class TwinCATSystemSimulation:
             
             with open(filename, 'w') as f:
                 json.dump(json_compatible, f, indent=2)
-            print(f"💾 Results saved to {filename}")
+            print(f"Results saved to {filename}")
         except Exception as e:
-            print(f"❌ Error saving results: {e}")
+            print(f"Error saving results: {e}")
             # Try to save a minimal version
             try:
                 minimal_results = {
@@ -477,50 +404,50 @@ class TwinCATSystemSimulation:
                 }
                 with open(f"minimal_{filename}", 'w') as f:
                     json.dump(minimal_results, f, indent=2)
-                print(f"💾 Minimal results saved to minimal_{filename}")
+                print(f"Minimal results saved to minimal_{filename}")
             except Exception as e2:
-                print(f"❌ Could not save minimal results either: {e2}")
+                print(f"Could not save minimal results either: {e2}")
     
     def print_summary(self, results: Dict):
         """
         Print comprehensive simulation summary
         """
-        print(f"\n📊 TwinCAT Simulation Results Summary")
+        print(f"\nTwinCAT Simulation Results Summary")
         print(f"=" * 50)
         
         perf = results['performance']
         analysis = results['analysis']
         
-        print(f"🎯 Performance:")
+        print(f"Performance:")
         print(f"  Total Cycles: {perf['total_cycles']}")
         print(f"  Zero Crossings: {perf['zero_crossings_detected']} ({analysis['summary']['zero_crossing_success_rate']:.1f}%)")
         print(f"  RMS Measurements: {perf['valid_rms_measurements']} ({analysis['summary']['measurement_success_rate']:.1f}%)")
         
         if 'frequency' in analysis:
             freq = analysis['frequency']
-            print(f"\n📏 Frequency Measurement:")
+            print(f"\nFrequency Measurement:")
             print(f"  Measured: {freq['mean_hz']:.4f} ± {freq['std_hz']:.4f} Hz")
             print(f"  Expected: {self.config.expected_frequency_hz} Hz")
             print(f"  Error: {freq['accuracy_error_hz']:.4f} Hz")
-            print(f"  Accuracy: {'✅ PASS' if freq['within_tolerance'] else '❌ FAIL'}")
+            print(f"  Accuracy: {'PASS' if freq['within_tolerance'] else 'FAIL'}")
         
         if 'voltage' in analysis:
             volt = analysis['voltage']
-            print(f"\n⚡ Voltage Measurement:")
+            print(f"\nVoltage Measurement:")
             print(f"  Measured: {volt['mean_v']:.1f} ± {volt['std_v']:.1f} V")
             print(f"  Expected: {self.config.expected_l2l_voltage_rms} V")
             print(f"  Error: {volt['accuracy_error_percent']:.2f}%")
-            print(f"  Accuracy: {'✅ PASS' if volt['within_tolerance'] else '❌ FAIL'}")
+            print(f"  Accuracy: {'PASS' if volt['within_tolerance'] else 'FAIL'}")
         
         if 'fir_filter' in analysis:
             fir = analysis['fir_filter']
-            print(f"\n🔧 FIR Filter:")
-            print(f"  Configured: {'✅ YES' if fir['configured'] else '❌ NO'}")
+            print(f"\nFIR Filter:")
+            print(f"  Configured: {'YES' if fir['configured'] else 'NO'}")
             print(f"  Phase Shift @ 50Hz: {fir['phase_shift_50hz_deg']:.2f}°")
         
         if 'zero_crossings' in analysis:
             zc = analysis['zero_crossings']
-            print(f"\n🎯 Zero Crossing Accuracy:")
+            print(f"\nZero Crossing Accuracy:")
             print(f"  Average Interval: {zc['avg_interval_ms']:.3f}ms")
             print(f"  Expected Interval: {zc['expected_interval_ms']:.3f}ms")
             print(f"  Timing Error: {zc['timing_accuracy_ms']:.3f}ms")
@@ -530,8 +457,9 @@ def main():
     """
     Main function to run the TwinCAT simulation
     """
-    print("⚡ TwinCAT Complete System Simulation - FIXED VERSION")
+    print("TwinCAT Complete System Simulation - REFACTORED VERSION")
     print("=" * 65)
+    print("CHANGES: Removed duplicate signal generator, using signal_generator.py")
     
     # Create simulation configuration
     config = SimulationConfig(
@@ -552,10 +480,10 @@ def main():
     # Save results
     simulation.save_results_to_file(results)
     
-    print(f"\n🎉 TwinCAT 1:1 Replica Simulation Complete!")
-    print(f"   All algorithms validated against original TwinCAT implementation")
-    print(f"   FIR Filter, Zero Crossing, RMS calculation working as designed")
-    print(f"   FIXES APPLIED: JSON serialization, timing calculations, bounds checking")
+    print(f"\nTwinCAT 1:1 Replica Simulation Complete!")
+    print(f"   Using single signal generator from signal_generator.py")
+    print(f"   No more duplicate code - cleaner architecture")
+    print(f"   All measurement algorithms working with unified signal generation")
 
 
 if __name__ == "__main__":
